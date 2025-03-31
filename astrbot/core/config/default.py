@@ -181,6 +181,15 @@ CONFIG_METADATA_2 = {
                         "telegram_api_base_url": "https://api.telegram.org/bot",
                         "telegram_file_base_url": "https://api.telegram.org/file/bot",
                     },
+                    "wcf(微信)": {
+                        "id": "wcf",
+                        "type": "wcf",
+                        "enable": False,
+                        "lark_bot_name": "",
+                        "app_id": "",
+                        "app_secret": "",
+                        "domain": "https://open.feishu.cn",
+                    },
                 },
                 "items": {
                     "telegram_token": {
