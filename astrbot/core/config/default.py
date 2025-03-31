@@ -185,10 +185,9 @@ CONFIG_METADATA_2 = {
                         "id": "wcf",
                         "type": "wcf",
                         "enable": False,
-                        "lark_bot_name": "",
-                        "app_id": "",
-                        "app_secret": "",
-                        "domain": "https://open.feishu.cn",
+                        "api_base_url": "https://qyapi.weixin.qq.com/",
+                        "callback_server_host": "0.0.0.0",
+                        "port": 9090,
                     },
                 },
                 "items": {

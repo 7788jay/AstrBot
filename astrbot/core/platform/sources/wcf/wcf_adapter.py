@@ -1,23 +1,83 @@
-import base64
+import sys
+import uuid
 import asyncio
-import json
-import re
-import astrbot.api.message_components as Comp
+import quart
 
 from astrbot.api.platform import (
     Platform,
     AstrBotMessage,
     MessageMember,
-    MessageType,
     PlatformMetadata,
+    MessageType,
 )
 from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Plain, Image, Record
 from astrbot.core.platform.astr_message_event import MessageSesion
-from .wcf_event import LarkMessageEvent
-from ...register import register_platform_adapter
-from astrbot import logger
-import lark_oapi as lark
-from lark_oapi.api.im.v1 import *
+from astrbot.api.platform import register_platform_adapter
+from astrbot.core import logger
+from requests import Response
+
+from wechatpy.enterprise.crypto import WeChatCrypto
+from wechatpy.enterprise import WeChatClient
+from wechatpy.enterprise.messages import TextMessage, ImageMessage, VoiceMessage
+from wechatpy.exceptions import InvalidSignatureException
+from wechatpy.enterprise import parse_message
+from .wcf_event import WcfPlatformEvent
+
+if sys.version_info >= (3, 12):
+    from typing import override
+else:
+    from typing_extensions import override
+
+
+class WcfServer:
+    def __init__(self, event_queue: asyncio.Queue, config: dict):
+        self.server = quart.Quart(__name__)
+        self.port = int(config.get("port"))
+        self.callback_server_host = config.get("callback_server_host", "0.0.0.0")
+        self.server.add_url_rule(
+            "/callback/command", view_func=self.verify, methods=["GET"]
+        )
+        self.server.add_url_rule(
+            "/callback/command", view_func=self.callback_command, methods=["POST"]
+        )
+        self.event_queue = event_queue
+
+        self.callback = None
+        self.shutdown_event = asyncio.Event()
+
+    async def verify(self):
+        logger.info(f"验证请求有效性: {quart.request.args}")
+        args = quart.request.args
+        try:
+            logger.info("验证请求有效性成功。")
+            return args
+        except InvalidSignatureException:
+            logger.error("验证请求有效性失败，签名异常，请检查配置。")
+            raise
+
+    async def callback_command(self):
+        data = await quart.request.get_data()
+
+        logger.info(f"解析成功: {data}")
+
+        if self.callback:
+            await self.callback(data)
+
+        return "success"
+
+    async def start_polling(self):
+        logger.info(
+            f"将在 {self.callback_server_host}:{self.port} 端口启动 WCF 适配器。"
+        )
+        await self.server.run_task(
+            host=self.callback_server_host,
+            port=self.port,
+            shutdown_trigger=self.shutdown_trigger,
+        )
+
+    async def shutdown_trigger(self):
+        await self.shutdown_event.wait()
 
 
 @register_platform_adapter("wcf", "微信wcf适配器")
@@ -26,168 +86,132 @@ class WcfPlatformAdapter(Platform):
         self, platform_config: dict, platform_settings: dict, event_queue: asyncio.Queue
     ) -> None:
         super().__init__(event_queue)
-
         self.config = platform_config
-
-        self.unique_session = platform_settings["unique_session"]
-
-        self.appid = platform_config["app_id"]
-        self.appsecret = platform_config["app_secret"]
-        self.domain = platform_config.get("domain", lark.FEISHU_DOMAIN)
-        self.bot_name = platform_config.get("lark_bot_name", "astrbot")
-
-        if not self.bot_name:
-            logger.warning("未设置飞书机器人名称，@ 机器人可能得不到回复。")
-
-        async def on_msg_event_recv(event: lark.im.v1.P2ImMessageReceiveV1):
-            await self.convert_msg(event)
-
-        def do_v2_msg_event(event: lark.im.v1.P2ImMessageReceiveV1):
-            asyncio.create_task(on_msg_event_recv(event))
-
-        self.event_handler = (
-            lark.EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(do_v2_msg_event)
-            .build()
+        self.settingss = platform_settings
+        self.client_self_id = uuid.uuid4().hex[:8]
+        self.api_base_url = platform_config.get(
+            "api_base_url", "https://qyapi.weixin.qq.com/cgi-bin/"
         )
 
-        self.client = lark.ws.Client(
-            app_id=self.appid,
-            app_secret=self.appsecret,
-            log_level=lark.LogLevel.ERROR,
-            domain=self.domain,
-            event_handler=self.event_handler,
-        )
+        if not self.api_base_url:
+            self.api_base_url = "https://qyapi.weixin.qq.com/cgi-bin/"
 
-        self.lark_api = (
-            lark.Client.builder().app_id(self.appid).app_secret(self.appsecret).build()
-        )
+        if self.api_base_url.endswith("/"):
+            self.api_base_url = self.api_base_url[:-1]
+        if not self.api_base_url.endswith("/cgi-bin"):
+            self.api_base_url += "/cgi-bin"
 
+        if not self.api_base_url.endswith("/"):
+            self.api_base_url += "/"
+
+        self.server = WcfServer(self._event_queue, self.config)
+
+        async def callback(msg):
+            await self.convert_message(msg)
+
+        self.server.callback = callback
+
+    @override
     async def send_by_session(
         self, session: MessageSesion, message_chain: MessageChain
     ):
-        raise NotImplementedError("WCF 适配器不支持 send_by_session")
+        await super().send_by_session(session, message_chain)
 
+    @override
     def meta(self) -> PlatformMetadata:
         return PlatformMetadata(
             "wcf",
-            "微信wcf适配器",
+            "wcf 适配器",
         )
 
-    async def convert_msg(self, event: lark.im.v1.P2ImMessageReceiveV1):
-        message = event.event.message
+    @override
+    async def run(self):
+        await self.server.start_polling()
+
+    async def convert_message(self, msg):
         abm = AstrBotMessage()
-        abm.timestamp = int(message.create_time) / 1000
-        abm.message = []
-        abm.type = (
-            MessageType.GROUP_MESSAGE
-            if message.chat_type == "group"
-            else MessageType.FRIEND_MESSAGE
-        )
-        if message.chat_type == "group":
-            abm.group_id = message.chat_id
-        abm.self_id = self.bot_name
-        abm.message_str = ""
-
-        at_list = {}
-        if message.mentions:
-            for m in message.mentions:
-                at_list[m.key] = Comp.At(qq=m.id.open_id, name=m.name)
-                if m.name == self.bot_name:
-                    abm.self_id = m.id.open_id
-
-        content_json_b = json.loads(message.content)
-
-        if message.message_type == "text":
-            message_str_raw = content_json_b["text"]  # 带有 @ 的消息
-            at_pattern = r"(@_user_\d+)"  # 可以根据需求修改正则
-            # at_users = re.findall(at_pattern, message_str_raw)
-            # 拆分文本，去掉AT符号部分
-            parts = re.split(at_pattern, message_str_raw)
-            for i in range(len(parts)):
-                s = parts[i].strip()
-                if not s:
-                    continue
-                if s in at_list:
-                    abm.message.append(at_list[s])
-                else:
-                    abm.message.append(Comp.Plain(parts[i].strip()))
-        elif message.message_type == "post":
-            _ls = []
-
-            content_ls = content_json_b.get("content", [])
-            for comp in content_ls:
-                if isinstance(comp, list):
-                    _ls.extend(comp)
-                elif isinstance(comp, dict):
-                    _ls.append(comp)
-            content_json_b = _ls
-        elif message.message_type == "image":
-            content_json_b = [
-                {"tag": "img", "image_key": content_json_b["image_key"], "style": []}
-            ]
-
-        if message.message_type in ("post", "image"):
-            for comp in content_json_b:
-                if comp["tag"] == "at":
-                    abm.message.append(at_list[comp["user_id"]])
-                elif comp["tag"] == "text" and comp["text"].strip():
-                    abm.message.append(Comp.Plain(comp["text"].strip()))
-                elif comp["tag"] == "img":
-                    image_key = comp["image_key"]
-                    request = (
-                        GetMessageResourceRequest.builder()
-                        .message_id(message.message_id)
-                        .file_key(image_key)
-                        .type("image")
-                        .build()
-                    )
-                    response = await self.lark_api.im.v1.message_resource.aget(request)
-                    if not response.success():
-                        logger.error(f"无法下载飞书图片: {image_key}")
-                    image_bytes = response.file.read()
-                    image_base64 = base64.b64encode(image_bytes).decode()
-                    abm.message.append(Comp.Image.fromBase64(image_base64))
-
-        for comp in abm.message:
-            if isinstance(comp, Comp.Plain):
-                abm.message_str += comp.text
-        abm.message_id = message.message_id
-        abm.raw_message = message
-        abm.sender = MessageMember(
-            user_id=event.event.sender.sender_id.open_id,
-            nickname=event.event.sender.sender_id.open_id[:8],
-        )
-        # 独立会话
-        if not self.unique_session:
-            if abm.type == MessageType.GROUP_MESSAGE:
-                abm.session_id = abm.group_id
-            else:
-                abm.session_id = abm.sender.user_id
-        else:
+        if msg.type == "text":
+            assert isinstance(msg, TextMessage)
+            abm.message_str = msg.content
+            abm.self_id = str(msg.agent)
+            abm.message = [Plain(msg.content)]
+            abm.type = MessageType.FRIEND_MESSAGE
+            abm.sender = MessageMember(
+                msg.source,
+                msg.source,
+            )
+            abm.message_id = msg.id
+            abm.timestamp = msg.time
             abm.session_id = abm.sender.user_id
+            abm.raw_message = msg
+        elif msg.type == "image":
+            assert isinstance(msg, ImageMessage)
+            abm.message_str = "[图片]"
+            abm.self_id = str(msg.agent)
+            abm.message = [Image(file=msg.image, url=msg.image)]
+            abm.type = MessageType.FRIEND_MESSAGE
+            abm.sender = MessageMember(
+                msg.source,
+                msg.source,
+            )
+            abm.message_id = msg.id
+            abm.timestamp = msg.time
+            abm.session_id = abm.sender.user_id
+            abm.raw_message = msg
+        elif msg.type == "voice":
+            assert isinstance(msg, VoiceMessage)
 
-        logger.debug(abm)
+            resp: Response = await asyncio.get_event_loop().run_in_executor(
+                None, self.client.media.download, msg.media_id
+            )
+            path = f"data/temp/wecom_{msg.media_id}.amr"
+            with open(path, "wb") as f:
+                f.write(resp.content)
+
+            try:
+                from pydub import AudioSegment
+
+                path_wav = f"data/temp/wecom_{msg.media_id}.wav"
+                audio = AudioSegment.from_file(path)
+                audio.export(path_wav, format="wav")
+            except Exception as e:
+                logger.error(f"转换音频失败: {e}。如果没有安装 ffmpeg 请先安装。")
+                path_wav = path
+                return
+
+            abm.message_str = ""
+            abm.self_id = str(msg.agent)
+            abm.message = [Record(file=path_wav, url=path_wav)]
+            abm.type = MessageType.FRIEND_MESSAGE
+            abm.sender = MessageMember(
+                msg.source,
+                msg.source,
+            )
+            abm.message_id = msg.id
+            abm.timestamp = msg.time
+            abm.session_id = abm.sender.user_id
+            abm.raw_message = msg
+
+        logger.info(f"abm: {abm}")
         await self.handle_msg(abm)
 
-    async def handle_msg(self, abm: AstrBotMessage):
-        event = LarkMessageEvent(
-            message_str=abm.message_str,
-            message_obj=abm,
+    async def handle_msg(self, message: AstrBotMessage):
+        message_event = WcfPlatformEvent(
+            message_str=message.message_str,
+            message_obj=message,
             platform_meta=self.meta(),
-            session_id=abm.session_id,
-            bot=self.lark_api,
+            session_id=message.session_id,
+            client=self.client,
         )
+        self.commit_event(message_event)
 
-        self._event_queue.put_nowait(event)
-
-    async def run(self):
-        # self.client.start()
-        await self.client._connect()
+    def get_client(self) -> WeChatClient:
+        return self.client
 
     async def terminate(self):
-        await self.client._disconnect()
-        logger.info("飞书(Lark) 适配器已被优雅地关闭")
+        self.server.shutdown_event.set()
+        await self.server.server.shutdown()
+        logger.info("企业微信 适配器已被优雅地关闭")
 
-    def get_client(self) -> lark.Client:
-        return self.client
+
+## [00:12:44] [Core] [INFO] [wcf.wcf_adapter:62]: 解析成功: b'{"is_self":false,"is_group":false,"id":603516295724061438,"type":1,"ts":1743437563,"roomid":"wxid_0t7odu3w4wpw41","content":"\xe4\xbd\xa0\xe5\xa5\xbd","sender":"wxid_0t7odu3w4wpw41","sign":"85bbccf398162943895f6b64488b9a4b","thumb":"","extra":"","xml":"<msgsource>\\n    <bizflag>0</bizflag>\\n    <pua>1</pua>\\n    <eggIncluded>1</eggIncluded>\\n    <signature>N0_V1_1Y3iKWcm|v1_UHj5U0bN</signature>\\n    <tmp_node>\\n        <publisher-id />\\n    </tmp_node>\\n    <sec_msg_node>\\n        <alnode>\\n            <fr>1</fr>\\n        </alnode>\\n    </sec_msg_node>\\n</msgsource>\\n"}'
