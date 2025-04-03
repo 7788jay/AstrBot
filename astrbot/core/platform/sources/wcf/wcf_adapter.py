@@ -5,8 +5,6 @@ import uuid
 
 import quart
 from requests import Response
-from wechatpy.enterprise import WeChatClient
-from wechatpy.enterprise.messages import TextMessage, ImageMessage, VoiceMessage
 
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain, Image, Record
@@ -125,7 +123,7 @@ class WcfPlatformAdapter(Platform):
         self, session: MessageSesion, message_chain: MessageChain
     ):
         await WcfPlatformEvent.send_with_client(
-            self, self.client, message_chain, session
+            self.client, message_chain, session.session_id
         )
         await super().send_by_session(session, message_chain)
 

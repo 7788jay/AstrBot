@@ -1,14 +1,12 @@
 import asyncio
 import base64
 import datetime
-import os
 import re
-import threading
 
 import aiohttp
 import anyio
 
-from astrbot.api import logger, sp
+from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, At, Record, Video
 from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
 from astrbot.core.utils.io import download_image_by_url
@@ -239,18 +237,17 @@ class SimpleWcfClient:
 
     async def post_image(self, to_wxid, image_url: str):
         """发送图片消息"""
-        payload = {
-            "appId": self.appid,
-            "toWxid": to_wxid,
-            "imgUrl": image_url,
+        data = {
+            "path": image_url,
+            "receiver": to_wxid
         }
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{self.base_url}/message/postImage", headers=self.headers, json=payload
+                    f"{self.base_url}/image", headers=self.headers, json=data
             ) as resp:
                 json_blob = await resp.json()
-                logger.debug(f"发送图片结果: {json_blob}")
+                logger.debug(f"发送消息结果: {json_blob}")
 
     async def post_emoji(self, to_wxid, emoji_md5, emoji_size, cdnurl=""):
         """发送emoji消息"""

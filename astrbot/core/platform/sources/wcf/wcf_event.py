@@ -1,12 +1,7 @@
-import uuid
-import requests
-from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.platform import AstrBotMessage, PlatformMetadata
-from astrbot.api.message_components import Plain, Image, Record
-from wechatpy.enterprise import WeChatClient
-
 from astrbot.api import logger
-from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.message_components import Plain, Image, Record
+from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 from astrbot.core.platform.sources.wcf.client import SimpleWcfClient
 
 try:
@@ -31,43 +26,18 @@ class WcfPlatformEvent(AstrMessageEvent):
         self.client = client
 
 
-    async def send_with_client(self,
-        client: SimpleWcfClient, message: MessageChain, session: MessageSesion
-    ):
-        self.message_obj = session
-        await WcfPlatformEvent.send(self, message)
+    @staticmethod
+    async def send_with_client(client: SimpleWcfClient, message: MessageChain, to_wx_id: str):
+        for comp in message.chain:
+            if isinstance(comp, Plain):
+                await client.post_text(to_wx_id, comp.text)
+            elif isinstance(comp, Image):
+                await client.post_image(to_wx_id, comp.url)
+            elif isinstance(comp, Record):
+                pass
         
 
     async def send(self, message: MessageChain):
         message_obj = self.message_obj
-
-        for comp in message.chain:
-            if isinstance(comp, Plain):
-                await self.client.post_text(message_obj.session_id, comp.text)
-            elif isinstance(comp, Image):
-                await self.client.post_image(message_obj.session_id, comp.url)
-            elif isinstance(comp, Record):
-                record_path = await comp.convert_to_file_path()
-                # 转成amr
-                record_path_amr = f"data/temp/{uuid.uuid4()}.amr"
-                pydub.AudioSegment.from_wav(record_path).export(
-                    record_path_amr, format="amr"
-                )
-
-                with open(record_path_amr, "rb") as f:
-                    try:
-                        response = self.client.media.upload("voice", f)
-                    except Exception as e:
-                        logger.error(f"企业微信上传语音失败: {e}")
-                        await self.send(
-                            MessageChain().message(f"企业微信上传语音失败: {e}")
-                        )
-                        return
-                    logger.info(f"企业微信上传语音返回: {response}")
-                    self.client.message.send_voice(
-                        message_obj.self_id,
-                        message_obj.session_id,
-                        response["media_id"],
-                    )
-
+        await self.send_with_client(self.client, message, message_obj.session_id)
         await super().send(message)
