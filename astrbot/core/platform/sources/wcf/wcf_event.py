@@ -1,10 +1,13 @@
 import uuid
+import requests
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 from astrbot.api.message_components import Plain, Image, Record
 from wechatpy.enterprise import WeChatClient
 
 from astrbot.api import logger
+from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.core.platform.sources.wcf.client import SimpleWcfClient
 
 try:
     import pydub
@@ -18,47 +21,31 @@ except Exception:
 class WcfPlatformEvent(AstrMessageEvent):
     def __init__(
         self,
+        client: SimpleWcfClient,
         message_str: str,
         message_obj: AstrBotMessage,
         platform_meta: PlatformMetadata,
-        session_id: str,
-        client: WeChatClient,
+        session_id: str
     ):
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.client = client
 
-    @staticmethod
-    async def send_with_client(
-        client: WeChatClient, message: MessageChain, user_name: str
+
+    async def send_with_client(self,
+        client: SimpleWcfClient, message: MessageChain, session: MessageSesion
     ):
-        pass
+        self.message_obj = session
+        await WcfPlatformEvent.send(self, message)
+        
 
     async def send(self, message: MessageChain):
         message_obj = self.message_obj
 
         for comp in message.chain:
             if isinstance(comp, Plain):
-                self.client.message.send_text(
-                    message_obj.self_id, message_obj.session_id, comp.text
-                )
+                await self.client.post_text(message_obj.session_id, comp.text)
             elif isinstance(comp, Image):
-                img_path = await comp.convert_to_file_path()
-
-                with open(img_path, "rb") as f:
-                    try:
-                        response = self.client.media.upload("image", f)
-                    except Exception as e:
-                        logger.error(f"企业微信上传图片失败: {e}")
-                        await self.send(
-                            MessageChain().message(f"企业微信上传图片失败: {e}")
-                        )
-                        return
-                    logger.info(f"企业微信上传图片返回: {response}")
-                    self.client.message.send_image(
-                        message_obj.self_id,
-                        message_obj.session_id,
-                        response["media_id"],
-                    )
+                await self.client.post_image(message_obj.session_id, comp.url)
             elif isinstance(comp, Record):
                 record_path = await comp.convert_to_file_path()
                 # 转成amr

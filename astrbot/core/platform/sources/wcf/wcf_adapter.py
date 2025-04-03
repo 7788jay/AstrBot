@@ -1,8 +1,15 @@
+import asyncio
+import json
 import sys
 import uuid
-import asyncio
-import quart
 
+import quart
+from requests import Response
+from wechatpy.enterprise import WeChatClient
+from wechatpy.enterprise.messages import TextMessage, ImageMessage, VoiceMessage
+
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Plain, Image, Record
 from astrbot.api.platform import (
     Platform,
     AstrBotMessage,
@@ -10,18 +17,10 @@ from astrbot.api.platform import (
     PlatformMetadata,
     MessageType,
 )
-from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain, Image, Record
-from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot.api.platform import register_platform_adapter
 from astrbot.core import logger
-from requests import Response
-
-from wechatpy.enterprise.crypto import WeChatCrypto
-from wechatpy.enterprise import WeChatClient
-from wechatpy.enterprise.messages import TextMessage, ImageMessage, VoiceMessage
-from wechatpy.exceptions import InvalidSignatureException
-from wechatpy.enterprise import parse_message
+from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.core.platform.sources.wcf.client import SimpleWcfClient
 from .wcf_event import WcfPlatformEvent
 
 if sys.version_info >= (3, 12):
@@ -29,6 +28,21 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import override
 
+
+class WxMsg:
+    def __init__(self, data):
+        self.is_self = data.get('is_self', False)
+        self.is_group = data.get('is_group', False)
+        self.id = data.get('id')
+        self.type = data.get('type')
+        self.ts = data.get('ts')
+        self.roomid = data.get('roomid')
+        self.content = data.get('content')
+        self.sender = data.get('sender')
+        self.sign = data.get('sign')
+        self.thumb = data.get('thumb')
+        self.extra = data.get('extra')
+        self.xml = data.get('xml')
 
 class WcfServer:
     def __init__(self, event_queue: asyncio.Queue, config: dict):
@@ -49,20 +63,24 @@ class WcfServer:
     async def verify(self):
         logger.info(f"验证请求有效性: {quart.request.args}")
         args = quart.request.args
-        try:
-            logger.info("验证请求有效性成功。")
-            return args
-        except InvalidSignatureException:
-            logger.error("验证请求有效性失败，签名异常，请检查配置。")
-            raise
+        return args
+
 
     async def callback_command(self):
         data = await quart.request.get_data()
-
+        msg = None
+        # 转json
+        try:
+            data = json.loads(data.decode("utf-8"))
+            # json转msg实体
+            msg = WxMsg(data)
+        except Exception as e:
+            logger.error(f"解析失败: {e}")
+            return "error"
         logger.info(f"解析成功: {data}")
 
         if self.callback:
-            await self.callback(data)
+            await self.callback(msg)
 
         return "success"
 
@@ -93,17 +111,6 @@ class WcfPlatformAdapter(Platform):
             "api_base_url", "https://qyapi.weixin.qq.com/cgi-bin/"
         )
 
-        if not self.api_base_url:
-            self.api_base_url = "https://qyapi.weixin.qq.com/cgi-bin/"
-
-        if self.api_base_url.endswith("/"):
-            self.api_base_url = self.api_base_url[:-1]
-        if not self.api_base_url.endswith("/cgi-bin"):
-            self.api_base_url += "/cgi-bin"
-
-        if not self.api_base_url.endswith("/"):
-            self.api_base_url += "/"
-
         self.server = WcfServer(self._event_queue, self.config)
 
         async def callback(msg):
@@ -111,10 +118,15 @@ class WcfPlatformAdapter(Platform):
 
         self.server.callback = callback
 
+        self.client = SimpleWcfClient(self.api_base_url)
+
     @override
     async def send_by_session(
         self, session: MessageSesion, message_chain: MessageChain
     ):
+        await WcfPlatformEvent.send_with_client(
+            self, self.client, message_chain, session
+        )
         await super().send_by_session(session, message_chain)
 
     @override
@@ -130,37 +142,37 @@ class WcfPlatformAdapter(Platform):
 
     async def convert_message(self, msg):
         abm = AstrBotMessage()
-        if msg.type == "text":
-            assert isinstance(msg, TextMessage)
+        if msg.type == 1:
             abm.message_str = msg.content
-            abm.self_id = str(msg.agent)
+            abm.self_id = str(msg.id)
             abm.message = [Plain(msg.content)]
-            abm.type = MessageType.FRIEND_MESSAGE
+            abm.type = MessageType.GROUP_MESSAGE if msg.is_group else MessageType.FRIEND_MESSAGE
             abm.sender = MessageMember(
-                msg.source,
-                msg.source,
+                msg.sender,
+                msg.sender,
             )
+            if msg.is_group:
+                abm.group_id = msg.roomid
             abm.message_id = msg.id
-            abm.timestamp = msg.time
+            abm.timestamp = msg.ts
             abm.session_id = abm.sender.user_id
             abm.raw_message = msg
-        elif msg.type == "image":
-            assert isinstance(msg, ImageMessage)
+        elif msg.type == 3:
             abm.message_str = "[图片]"
-            abm.self_id = str(msg.agent)
+            abm.self_id = str(msg.id)
             abm.message = [Image(file=msg.image, url=msg.image)]
-            abm.type = MessageType.FRIEND_MESSAGE
+            abm.type = MessageType.GROUP_MESSAGE if msg.is_group else MessageType.FRIEND_MESSAGE
             abm.sender = MessageMember(
-                msg.source,
-                msg.source,
+                msg.sender,
+                msg.sender,
             )
+            if msg.is_group:
+                abm.group_id = msg.roomid
             abm.message_id = msg.id
-            abm.timestamp = msg.time
+            abm.timestamp = msg.ts
             abm.session_id = abm.sender.user_id
             abm.raw_message = msg
-        elif msg.type == "voice":
-            assert isinstance(msg, VoiceMessage)
-
+        elif msg.type == 34:
             resp: Response = await asyncio.get_event_loop().run_in_executor(
                 None, self.client.media.download, msg.media_id
             )
@@ -180,15 +192,17 @@ class WcfPlatformAdapter(Platform):
                 return
 
             abm.message_str = ""
-            abm.self_id = str(msg.agent)
+            abm.self_id = str(msg.id)
             abm.message = [Record(file=path_wav, url=path_wav)]
-            abm.type = MessageType.FRIEND_MESSAGE
+            abm.type = MessageType.GROUP_MESSAGE if msg.is_group else MessageType.FRIEND_MESSAGE
             abm.sender = MessageMember(
-                msg.source,
-                msg.source,
+                msg.sender,
+                msg.sender,
             )
+            if msg.is_group:
+                abm.group_id = msg.roomid
             abm.message_id = msg.id
-            abm.timestamp = msg.time
+            abm.timestamp = msg.ts
             abm.session_id = abm.sender.user_id
             abm.raw_message = msg
 
@@ -197,21 +211,19 @@ class WcfPlatformAdapter(Platform):
 
     async def handle_msg(self, message: AstrBotMessage):
         message_event = WcfPlatformEvent(
+            client=self.client,
             message_str=message.message_str,
             message_obj=message,
             platform_meta=self.meta(),
-            session_id=message.session_id,
-            client=self.client,
+            session_id=message.session_id
         )
         self.commit_event(message_event)
 
-    def get_client(self) -> WeChatClient:
-        return self.client
 
     async def terminate(self):
         self.server.shutdown_event.set()
         await self.server.server.shutdown()
-        logger.info("企业微信 适配器已被优雅地关闭")
+        logger.info("WCF 适配器已被优雅地关闭")
 
 
 ## [00:12:44] [Core] [INFO] [wcf.wcf_adapter:62]: 解析成功: b'{"is_self":false,"is_group":false,"id":603516295724061438,"type":1,"ts":1743437563,"roomid":"wxid_0t7odu3w4wpw41","content":"\xe4\xbd\xa0\xe5\xa5\xbd","sender":"wxid_0t7odu3w4wpw41","sign":"85bbccf398162943895f6b64488b9a4b","thumb":"","extra":"","xml":"<msgsource>\\n    <bizflag>0</bizflag>\\n    <pua>1</pua>\\n    <eggIncluded>1</eggIncluded>\\n    <signature>N0_V1_1Y3iKWcm|v1_UHj5U0bN</signature>\\n    <tmp_node>\\n        <publisher-id />\\n    </tmp_node>\\n    <sec_msg_node>\\n        <alnode>\\n            <fr>1</fr>\\n        </alnode>\\n    </sec_msg_node>\\n</msgsource>\\n"}'
