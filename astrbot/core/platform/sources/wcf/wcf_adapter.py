@@ -66,7 +66,6 @@ class WcfServer:
 
     async def callback_command(self):
         data = await quart.request.get_data()
-        msg = None
         # 转json
         try:
             data = json.loads(data.decode("utf-8"))
@@ -149,11 +148,12 @@ class WcfPlatformAdapter(Platform):
                 msg.sender,
                 msg.sender,
             )
+            abm.session_id = msg.sender
             if msg.is_group:
                 abm.group_id = msg.roomid
+                abm.session_id = f"{msg.sender}#{msg.roomid}"
             abm.message_id = msg.id
             abm.timestamp = msg.ts
-            abm.session_id = abm.sender.user_id
             abm.raw_message = msg
         elif msg.type == 3:
             abm.message_str = "[图片]"
@@ -164,11 +164,12 @@ class WcfPlatformAdapter(Platform):
                 msg.sender,
                 msg.sender,
             )
+            abm.session_id = msg.sender
             if msg.is_group:
                 abm.group_id = msg.roomid
+                abm.session_id = f"{msg.sender}#{msg.roomid}"
             abm.message_id = msg.id
             abm.timestamp = msg.ts
-            abm.session_id = abm.sender.user_id
             abm.raw_message = msg
         elif msg.type == 34:
             resp: Response = await asyncio.get_event_loop().run_in_executor(
@@ -197,11 +198,12 @@ class WcfPlatformAdapter(Platform):
                 msg.sender,
                 msg.sender,
             )
+            abm.session_id = msg.sender
             if msg.is_group:
                 abm.group_id = msg.roomid
+                abm.session_id = f"{msg.sender}#{msg.roomid}"
             abm.message_id = msg.id
             abm.timestamp = msg.ts
-            abm.session_id = abm.sender.user_id
             abm.raw_message = msg
 
         logger.info(f"abm: {abm}")

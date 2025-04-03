@@ -214,14 +214,9 @@ class SimpleWcfClient:
         return abm
 
     async def post_text(self, to_wxid, content: str, ats: str = ""):
-        """发送文本消息到群聊
-        
-        Args:
-            aters: 要@的用户wxid
-            msg: 消息内容,支持\n换行
-            receiver: 群聊id
-        """
-
+        if "#" in to_wxid:
+            to_wxid = to_wxid.split("#")[1]
+            ats = to_wxid.split("#")[0]
         data = {
             "aters": ats,
             "msg": content,
@@ -237,6 +232,9 @@ class SimpleWcfClient:
 
     async def post_image(self, to_wxid, image_url: str):
         """发送图片消息"""
+        if "#" in to_wxid:
+            to_wxid = to_wxid.split("#")[1]
+
         data = {
             "path": image_url,
             "receiver": to_wxid
