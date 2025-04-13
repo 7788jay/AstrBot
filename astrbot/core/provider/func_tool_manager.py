@@ -95,7 +95,10 @@ class MCPClient:
             mcp_server_config (dict): Configuration for the MCP server. See https://modelcontextprotocol.io/quickstart/server
         """
         cfg = mcp_server_config.copy()
-        cfg.pop("active", None)
+        if "mcpServers" in cfg and len(cfg["mcpServers"]) > 0:
+            key_0 = list(cfg["mcpServers"].keys())[0]
+            cfg = cfg["mcpServers"][key_0]
+        cfg.pop("active", None) # Remove active flag from config
         server_params = mcp.StdioServerParameters(
             **cfg,
         )
@@ -260,6 +263,11 @@ class FuncCall:
                     if data["name"] in self.mcp_client_event:
                         self.mcp_client_event[data["name"]].set()
                         self.mcp_client_event.pop(data["name"], None)
+                        self.func_list = [
+                            f
+                            for f in self.func_list
+                            if not (f.origin == "mcp" and f.mcp_server_name == data["name"])
+                        ]
                 else:
                     for name in self.mcp_client_dict.keys():
                         # await self._terminate_mcp_client(name)
@@ -267,6 +275,11 @@ class FuncCall:
                         if name in self.mcp_client_event:
                             self.mcp_client_event[name].set()
                             self.mcp_client_event.pop(name, None)
+                    self.func_list = [
+                        f
+                        for f in self.func_list
+                        if f.origin != "mcp"
+                    ]
 
     async def _init_mcp_client_task_wrapper(
         self, name: str, cfg: dict, event: asyncio.Event
@@ -339,7 +352,7 @@ class FuncCall:
             ]
             logger.info(f"已关闭 MCP 服务 {name}")
 
-    def get_func_desc_openai_style(self) -> list:
+    def get_func_desc_openai_style(self, omit_empty_parameter_field = False) -> list:
         """
         获得 OpenAI API 风格的**已经激活**的工具描述
         """
@@ -348,16 +361,19 @@ class FuncCall:
         for f in self.func_list:
             if not f.active:
                 continue
-            _l.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": f.name,
-                        "parameters": f.parameters,
-                        "description": f.description,
-                    },
-                }
-            )
+            func_ = {
+                "type": "function",
+                "function": {
+                    "name": f.name,
+                    # "parameters": f.parameters,
+                    "description": f.description,
+                },
+            }
+            func_["function"]["parameters"] = f.parameters
+            if not f.parameters.get("properties") and omit_empty_parameter_field:
+                # 如果 properties 为空，并且 omit_empty_parameter_field 为 True，则删除 parameters 字段
+                del func_["function"]["parameters"]
+            _l.append(func_)
         return _l
 
     def get_func_desc_anthropic_style(self) -> list:

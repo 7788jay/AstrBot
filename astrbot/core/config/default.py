@@ -2,7 +2,7 @@
 如需修改配置，请在 `data/cmd_config.json` 中修改或者在管理面板中可视化修改。
 """
 
-VERSION = "3.5.2"
+VERSION = "3.5.3.2"
 DB_PATH = "data/data_v3.db"
 
 # 默认配置
@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
         "default_personality": "default",
         "prompt_prefix": "",
         "max_context_length": -1,
+        "dequeue_context_length": 1,
+        "streaming_response": False,
     },
     "provider_stt_settings": {
         "enable": False,
@@ -255,6 +257,9 @@ CONFIG_METADATA_2 = {
                 "description": "平台设置",
                 "type": "object",
                 "items": {
+                    "plugin_enable": {
+                        "invisible": True,  # 隐藏插件启用配置
+                    },
                     "unique_session": {
                         "description": "会话隔离",
                         "type": "bool",
@@ -931,8 +936,8 @@ CONFIG_METADATA_2 = {
                     "dify_api_type": {
                         "description": "Dify 应用类型",
                         "type": "string",
-                        "hint": "Dify API 类型。根据 Dify 官网，目前支持 chat, agent, workflow 三种应用类型",
-                        "options": ["chat", "agent", "workflow"],
+                        "hint": "Dify API 类型。根据 Dify 官网，目前支持 chat, chatflow, agent, workflow 三种应用类型。",
+                        "options": ["chat", "chatflow", "agent", "workflow"],
                     },
                     "dify_workflow_output_key": {
                         "description": "Dify Workflow 输出变量名",
@@ -1000,6 +1005,16 @@ CONFIG_METADATA_2 = {
                         "description": "最多携带对话数量(条)",
                         "type": "int",
                         "hint": "超出这个数量时将丢弃最旧的部分，用户和AI的一轮聊天记为 1 条。-1 表示不限制，默认为不限制。",
+                    },
+                    "dequeue_context_length": {
+                        "description": "丢弃对话数量(条)",
+                        "type": "int",
+                        "hint": "超出 最多携带对话数量(条) 时，丢弃多少条记录，用户和AI的一轮聊天记为 1 条。适宜的配置，可以提高超长上下文对话 deepseek 命中缓存效果，理想情况下计费将降低到1/3以下",
+                    },
+                    "streaming_response": {
+                        "description": "启用流式回复",
+                        "type": "bool",
+                        "hint": "启用后，将会流式输出 LLM 的响应。目前仅支持 OpenAI API提供商 以及 Telegram、QQ Official 私聊 两个平台",
                     },
                 },
             },

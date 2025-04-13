@@ -60,11 +60,13 @@ def validate_config(
                         data[key] = False
                 continue
             meta = metadata[key]
+            if "type" not in meta:
+                logger.debug(f"配置项 {path}{key} 没有类型定义, 跳过校验")
+                continue
             # null 转换
             if value is None:
                 data[key] = DEFAULT_VALUE_MAP[meta["type"]]
                 continue
-            # 递归验证
             if meta["type"] == "list" and not isinstance(value, list):
                 errors.append(
                     f"错误的类型 {path}{key}: 期望是 list, 得到了 {type(value).__name__}"
@@ -179,7 +181,7 @@ class ConfigRoute(Route):
             await self._save_astrbot_configs(post_configs)
             return Response().ok(None, "保存成功~ 机器人正在重载配置。").__dict__
         except Exception as e:
-            logger.error(e)
+            logger.error(traceback.format_exc())
             return Response().error(str(e)).__dict__
 
     async def post_plugin_configs(self):
