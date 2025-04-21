@@ -3,7 +3,8 @@ import base64
 import json
 import logging
 import random
-from typing import Dict, List, Optional, AsyncGenerator
+from typing import Dict, List, Optional
+from collections.abc import AsyncGenerator
 
 from google import genai
 from google.genai import types
@@ -122,10 +123,11 @@ class ProviderGoogleGenAI(Provider):
 
     async def _prepare_query_config(
         self,
+        payloads: dict,
         tools: Optional[FuncCall] = None,
         system_instruction: Optional[str] = None,
-        temperature: Optional[float] = 0.7,
         modalities: Optional[List[str]] = None,
+        temperature: float = 0.7,
     ) -> types.GenerateContentConfig:
         """准备查询配置"""
         if not modalities:
@@ -154,11 +156,21 @@ class ProviderGoogleGenAI(Provider):
             if tools:
                 logger.warning("已启用搜索工具，函数工具将被忽略")
         elif tools and (func_desc := tools.get_func_desc_google_genai_style()):
-            tool_list = [types.Tool(function_declarations=func_desc["function_declarations"])]
-
+            tool_list = [
+                types.Tool(function_declarations=func_desc["function_declarations"])
+            ]
         return types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=temperature,
+            max_output_tokens=payloads.get("max_tokens") or payloads.get("maxOutputTokens"),
+            top_p=payloads.get("top_p") or payloads.get("topP"),
+            top_k=payloads.get("top_k") or payloads.get("topK"),
+            frequency_penalty=payloads.get("frequency_penalty") or payloads.get("frequencyPenalty"),
+            presence_penalty=payloads.get("presence_penalty") or payloads.get("presencePenalty"),
+            stop_sequences=payloads.get("stop") or payloads.get("stopSequences"),
+            response_logprobs=payloads.get("response_logprobs") or payloads.get("responseLogprobs"),
+            logprobs=payloads.get("logprobs"),
+            seed=payloads.get("seed"),
             response_modalities=modalities,
             tools=tool_list,
             safety_settings=self.safety_settings if self.safety_settings else None,
@@ -167,8 +179,7 @@ class ProviderGoogleGenAI(Provider):
             ),
         )
 
-    @staticmethod
-    def _prepare_conversation(payloads: Dict) -> List[types.Content]:
+    def _prepare_conversation(self, payloads: Dict) -> List[types.Content]:
         """准备 Gemini SDK 的 Content 列表"""
 
         def create_text_part(text: str) -> types.UserContent:
@@ -184,6 +195,12 @@ class ProviderGoogleGenAI(Provider):
             return types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
         gemini_contents: List[types.Content] = []
+        native_tool_enabled = any(
+            [
+                self.provider_config.get("gm_native_coderunner", False),
+                self.provider_config.get("gm_native_search", False),
+            ]
+        )
         for message in payloads["messages"]:
             role, content = message["role"], message.get("content")
 
@@ -204,7 +221,7 @@ class ProviderGoogleGenAI(Provider):
                     gemini_contents.append(
                         types.ModelContent(parts=[types.Part.from_text(text=content)])
                     )
-                elif "tool_calls" in message:
+                elif "tool_calls" in message and not native_tool_enabled:
                     gemini_contents.extend(
                         [
                             types.ModelContent(
@@ -220,11 +237,15 @@ class ProviderGoogleGenAI(Provider):
                     )
                 else:
                     logger.warning("assistant 角色的消息内容为空，已添加空格占位")
+                    if native_tool_enabled:
+                        logger.warning(
+                            "检测到启用Gemini原生工具，且上下文中存在函数调用，建议使用 /reset 重置上下文"
+                        )
                     gemini_contents.append(
                         types.ModelContent(parts=[types.Part.from_text(text=" ")])
                     )
 
-            elif role == "tool":
+            elif role == "tool" and not native_tool_enabled:
                 gemini_contents.append(
                     types.UserContent(
                         parts=[
@@ -293,7 +314,7 @@ class ProviderGoogleGenAI(Provider):
         return MessageChain(chain=chain)
 
     async def _query(
-        self, payloads: dict, tools: FuncCall, temperature: float = 0.7
+        self, payloads: dict, tools: FuncCall
     ) -> LLMResponse:
         """非流式请求 Gemini API"""
         system_instruction = next(
@@ -306,12 +327,13 @@ class ProviderGoogleGenAI(Provider):
             modalities.append("Image")
 
         conversation = self._prepare_conversation(payloads)
+        temperature=payloads.get("temperature", 0.7)
 
         result: Optional[types.GenerateContentResponse] = None
         while True:
             try:
                 config = await self._prepare_query_config(
-                    tools, system_instruction, temperature, modalities
+                    payloads, tools, system_instruction, modalities, temperature
                 )
                 result = await self.client.models.generate_content(
                     model=self.get_model(),
@@ -358,7 +380,7 @@ class ProviderGoogleGenAI(Provider):
         return llm_response
 
     async def _query_stream(
-        self, payloads: dict, tools: FuncCall, temperature: float = 0.7
+        self, payloads: dict, tools: FuncCall
     ) -> AsyncGenerator[LLMResponse, None]:
         """流式请求 Gemini API"""
         system_instruction = next(
@@ -372,7 +394,7 @@ class ProviderGoogleGenAI(Provider):
         while True:
             try:
                 config = await self._prepare_query_config(
-                    tools, system_instruction, temperature
+                    payloads, tools, system_instruction
                 )
                 result = await self.client.models.generate_content_stream(
                     model=self.get_model(),
@@ -452,11 +474,10 @@ class ProviderGoogleGenAI(Provider):
 
         retry = 10
         keys = self.api_keys.copy()
-        temp = kwargs.get("temperature", 0.7)  # 暂定默认温度为0.7
 
         for _ in range(retry):
             try:
-                return await self._query(payloads, func_tool, temp)
+                return await self._query(payloads, func_tool)
             except APIError as e:
                 if await self._handle_api_error(e, keys):
                     continue
@@ -493,11 +514,10 @@ class ProviderGoogleGenAI(Provider):
 
         retry = 10
         keys = self.api_keys.copy()
-        temp = kwargs.get("temperature", 0.7)  # 暂定默认温度为0.7
 
         for _ in range(retry):
             try:
-                async for response in self._query_stream(payloads, func_tool, temp):
+                async for response in self._query_stream(payloads, func_tool):
                     yield response
                 break
             except APIError as e:
